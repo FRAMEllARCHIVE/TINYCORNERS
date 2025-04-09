@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test Corner Detection</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
+  <style>
+    body { font-family: sans-serif; }
+    canvas { border: 1px solid #ccc; margin-top: 10px; }
+    #controls { margin-top: 10px; }
+    button { margin: 5px; }
+  </style>
+</head>
+<body>
+  <h2>Corner Detection: Test Model</h2>
+  
+  <input type="file" id="imageUpload" accept="image/*"><br><br>
+  <canvas id="canvas" width="256" height="256"></canvas>
+  
+  <div id="controls">
+    <button id="loadModelBtn">Load Saved Model</button>
+    <button id="predictBtn" disabled>Predict Corners</button>
+  </div>
+  
+  <div id="status"></div>
+  <div id="coordinates"></div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const imageUpload = document.getElementById('imageUpload');
+    const statusDiv = document.getElementById('status');
+    const coordinatesDiv = document.getElementById('coordinates');
+    const loadModelBtn = document.getElementById('loadModelBtn');
+    const predictBtn = document.getElementById('predictBtn');
+
+    let model = null;
+    let currentImgElement = null;
+
+    loadModelBtn.addEventListener('click', async () => {
+      model = await tf.loadLayersModel('./corner_detector_model.json');
+      statusDiv.textContent = 'Model loaded!';
+      predictBtn.disabled = false;
+    });
+
+    imageUpload.addEventListener('change', e => {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = function(event) {
+        const img = new Image();
+        img.onload = function() {
+          currentImgElement = img;
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    predictBtn.addEventListener('click', async () => {
+      if (!model || !currentImgElement) {
+        statusDiv.textContent = 'Model not loaded or image not uploaded!';
+        return;
+      }
+
+      const offscreen = document.createElement('canvas');
+      offscreen.width = 128;
+      offscreen.height = 128;
+      const offCtx = offscreen.getContext('2d');
+      offCtx.drawImage(currentImgElement, 0, 0, 128, 128);
+
+      const inputTensor = tf.browser.fromPixels(offscreen).toFloat().div(255).expandDims();
+      
+      const prediction = model.predict(inputTensor);
+      const corners = prediction.dataSync();
+
+      ctx.drawImage(currentImgElement, 0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'lime';
+      for (let i = 0; i < 4; i++) {
+        const x = corners[i * 2] * canvas.width;
+        const y = corners[i * 2 + 1] * canvas.height;
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+
+      coordinatesDiv.textContent = `Predicted Corners:\n`;
+      for (let i = 0; i < 4; i++) {
+        const x = corners[i * 2] * canvas.width;
+        const y = corners[i * 2 + 1] * canvas.height;
+        coordinatesDiv.textContent += `Corner ${i + 1}: (${x.toFixed(2)}, ${y.toFixed(2)})\n`;
+      }
+
+      statusDiv.textContent = 'Prediction complete!';
+    });
+  </script>
+</body>
+</html>
