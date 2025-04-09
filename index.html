@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Corner Detection Trainer</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
+  <style>
+    body { font-family: sans-serif; }
+    canvas { border: 1px solid #ccc; }
+    #controls { margin-top: 10px; }
+    button { margin: 5px; }
+  </style>
+</head>
+<body>
+  <h2>Corner Detection Trainer (in-browser)</h2>
+  
+  <input type="file" id="imageUpload" accept="image/*"><br><br>
+  <canvas id="canvas" width="256" height="256"></canvas>
+  
+  <div id="controls">
+    <p id="cornerPoints">Click 4 corners in order</p>
+    <button id="trainBtn" disabled>Train Model</button>
+    <button id="saveModelBtn" disabled>Download Trained Model</button>
+    <button id="loadModelBtn">Load Saved Model</button>
+    <button id="predictBtn" disabled>Predict on Current Image</button>
+  </div>
+  
+  <div id="status"></div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const imageUpload = document.getElementById('imageUpload');
+    const cornerPointsDiv = document.getElementById('cornerPoints');
+    const trainBtn = document.getElementById('trainBtn');
+    const saveModelBtn = document.getElementById('saveModelBtn');
+    const loadModelBtn = document.getElementById('loadModelBtn');
+    const predictBtn = document.getElementById('predictBtn');
+    const statusDiv = document.getElementById('status');
+
+    const IMAGE_SIZE = 128;
+    let imgData = [];
+    let labelData = [];
+    let points = [];
+    let rawImage = null;
+    let currentImgElement = null;
+    let model = null;
+
+    imageUpload.addEventListener('change', e => {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = function(event) {
+        const img = new Image();
+        img.onload = function() {
+          currentImgElement = img;
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          points = [];
+          updatePointsDisplay();
+        };
+        img.src = event.target.result;
+        rawImage = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    canvas.addEventListener('click', e => {
+      if (!currentImgElement || points.length >= 4) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / canvas.width;
+      const y = (e.clientY - rect.top) / canvas.height;
+      points.push([x, y]);
+      drawPoints();
+      updatePointsDisplay();
+      if (points.length === 4) {
+        storeExample();
+      }
+    });
+
+    function drawPoints() {
+      ctx.drawImage(currentImgElement, 0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'red';
+      points.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p[0] * canvas.width, p[1] * canvas.height, 5, 0, 2 * Math.PI);
+        ctx.fill();
+      });
+    }
+
+    function updatePointsDisplay() {
+      cornerPointsDiv.textContent = `Points: ${points.length}/4`;
+    }
+
+    function storeExample() {
+      const offscreen = document.createElement('canvas');
+      offscreen.width = IMAGE_SIZE;
+      offscreen.height = IMAGE_SIZE;
+      const offCtx = offscreen.getContext('2d');
+      offCtx.drawImage(currentImgElement, 0, 0, IMAGE_SIZE, IMAGE_SIZE);
+      const imgTensor = tf.browser.fromPixels(offscreen).toFloat().div(255);
+      imgData.push(imgTensor);
+      labelData.push(points.flat());
+      points = [];
+      updatePointsDisplay();
+      trainBtn.disabled = false;
+    }
+
+    function createModel() {
+      const model = tf.sequential();
+      model.add(tf.layers.conv2d({
+        inputShape: [IMAGE_SIZE, IMAGE_SIZE, 3],
+        filters: 16, kernelSize: 3, activation: 'relu', padding: 'same'
+      }));
+      model.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+      model.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, activation: 'relu', padding: 'same' }));
+      model.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+      model.add(tf.layers.conv2d({ filters: 64, kernelSize: 3, activation: 'relu', padding: 'same' }));
+      model.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+      model.add(tf.layers.flatten());
+      model.add(tf.layers.dense({ units: 128, activation: 'relu' }));
+      model.add(tf.layers.dense({ units: 8, activation: 'sigmoid' }));
+      model.compile({ optimizer: 'adam', loss: 'meanSquaredError' });
+      return model;
+    }
+
+    trainBtn.addEventListener('click', async () => {
+      model = createModel();
+      const xs = tf.stack(imgData);
+      const ys = tf.tensor2d(labelData);
+
+      statusDiv.textContent = 'Training...';
+      await model.fit(xs, ys, {
+        epochs: 20,
+        callbacks: {
+          onEpochEnd: (epoch, logs) => {
+            statusDiv.textContent = `Epoch ${epoch + 1}: loss = ${logs.loss.toFixed(4)}`;
+          },
+          onTrainEnd: () => {
+            statusDiv.textContent += ' — Training complete!';
+            saveModelBtn.disabled = false;
+            predictBtn.disabled = false;
+          }
+        }
+      });
+    });
+
+    saveModelBtn.addEventListener('click', async () => {
+      if (model) {
+        await model.save('downloads://corner_detector_model');
+      }
+    });
+
+    loadModelBtn.addEventListener('click', async () => {
+      model = await tf.loadLayersModel('./corner_detector_model.json');
+      statusDiv.textContent = 'Model loaded!';
+      predictBtn.disabled = false;
+    });
+
+    predictBtn.addEventListener('click', async () => {
+      if (!model || !currentImgElement) return;
+
+      const offscreen = document.createElement('canvas');
+      offscreen.width = IMAGE_SIZE;
+      offscreen.height = IMAGE_SIZE;
+      const offCtx = offscreen.getContext('2d');
+      offCtx.drawImage(currentImgElement, 0, 0, IMAGE_SIZE, IMAGE_SIZE);
+      const input = tf.browser.fromPixels(offscreen).toFloat().div(255).expandDims();
+
+      const prediction = model.predict(input);
+      const corners = prediction.dataSync();
+
+      ctx.drawImage(currentImgElement, 0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'lime';
+      for (let i = 0; i < 4; i++) {
+        const x = corners[i * 2] * canvas.width;
+        const y = corners[i * 2 + 1] * canvas.height;
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+
+      statusDiv.textContent = `Prediction complete.`;
+    });
+  </script>
+</body>
+</html>
