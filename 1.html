@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Corner Detection Trainer</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
+  <style>
+    body { 
+      font-family: sans-serif; 
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    canvas { 
+      border: 1px solid #ccc;
+      display: block;
+      margin: 10px 0;
+    }
+    #controls { 
+      margin-top: 10px; 
+    }
+    button { 
+      margin: 5px;
+      padding: 8px 12px;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    #status {
+      margin-top: 10px;
+      padding: 10px;
+      background-color: #f1f1f1;
+      border-radius: 4px;
+      min-height: 20px;
+    }
+    .upload-btn-wrapper {
+      position: relative;
+      overflow: hidden;
+      display: inline-block;
+    }
+    .upload-btn-wrapper input[type=file] {
+      font-size: 100px;
+      position: absolute;
+      left: 0;
+      top: 0;
+      opacity: 0;
+    }
+    .btn {
+      border: 2px solid gray;
+      color: gray;
+      background-color: white;
+      padding: 8px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: bold;
+    }
+    #trainingInfo {
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h2>Corner Detection Trainer (in-browser)</h2>
+  
+  <input type="file" id="imageUpload" accept="image/*">
+  <p>Upload an image to mark corners or test the model</p>
+  
+  <canvas id="canvas" width="256" height="256"></canvas>
+  
+  <div id="controls">
+    <p id="cornerPoints">Click 4 corners in order</p>
+    <button id="clearBtn">Clear Points</button>
+    <button id="trainBtn" disabled>Train Model</button>
+    <button id="saveModelBtn" disabled>Download Trained Model</button>
+    
+    <div id="modelUpload" style="margin-top: 10px;">
+      <h3>Model Upload</h3>
+      <p>Upload both model files together:</p>
+      <input type="file" id="modelJsonUpload" accept=".json">
+      <label for="modelJsonUpload">Select model.json</label>
+      <br>
+      <input type="file" id="modelWeightsUpload" accept=".bin">
+      <label for="modelWeightsUpload">Select model.weights.bin</label>
+      <br>
+      <button id="loadModelBtn" disabled>Load Selected Model</button>
+    </div>
+    
+    <button id="predictBtn" disabled>Predict on Current Image</button>
+  </div>
+  
+  <div id="trainingInfo">
+    <p>Training examples: <span id="exampleCount">0</span></p>
+    <div id="trainingProgress"></div>
+  </div>
+  
+  <div id="status"></div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const imageUpload = document.getElementById('imageUpload');
+    const cornerPointsDiv = document.getElementById('cornerPoints');
+    const clearBtn = document.getElementById('clearBtn');
+    const trainBtn = document.getElementById('trainBtn');
+    const saveModelBtn = document.getElementById('saveModelBtn');
+    const loadModelBtn = document.getElementById('loadModelBtn');
+    const predictBtn = document.getElementById('predictBtn');
+    const statusDiv = document.getElementById('status');
+    const exampleCountSpan = document.getElementById('exampleCount');
+    const modelJsonUpload = document.getElementById('modelJsonUpload');
+    const modelWeightsUpload = document.getElementById('modelWeightsUpload');
+    const trainingProgressDiv = document.getElementById('trainingProgress');
+
+    const IMAGE_SIZE = 128;
+    let imgData = [];
+    let labelData = [];
+    let points = [];
+    let rawImage = null;
+    let currentImgElement = null;
+    let model = null;
+    let modelJson = null;
+    let modelWeights = null;
+
+    function checkModelFilesSelected() {
+      loadModelBtn.disabled = !(modelJson && modelWeights);
+    }
+
+    modelJsonUpload.addEventListener('change', e => {
+      modelJson = e.target.files[0];
+      checkModelFilesSelected();
+    });
+
+    modelWeightsUpload.addEventListener('change', e => {
+      modelWeights = e.target.files[0];
+      checkModelFilesSelected();
+    });
+
+    imageUpload.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      
+      const reader = new FileReader();
+      reader.onload = function(event) {
+        const img = new Image();
+        img.onload = function() {
+          currentImgElement = img;
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          points = [];
+          updatePointsDisplay();
+          if (model) {
+            predictBtn.disabled = false;
+          }
+        };
+        img.src = event.target.result;
+        rawImage = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    canvas.addEventListener('click', e => {
+      if (!currentImgElement || points.length >= 4) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / canvas.width;
+      const y = (e.clientY - rect.top) / canvas.height;
+      points.push([x, y]);
+      drawPoints();
+      updatePointsDisplay();
+      if (points.length === 4) {
+        storeExample();
+      }
+    });
+
+    clearBtn.addEventListener('click', () => {
+      if (currentImgElement) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(currentImgElement, 0, 0, canvas.width, canvas.height);
+        points = [];
+        updatePointsDisplay();
+      }
+    });
+
+    function drawPoints() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(currentImgElement, 0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'red';
+      points.forEach((p, idx) => {
+        ctx.beginPath();
+        ctx.arc(p[0] * canvas.width, p[1] * canvas.height, 5, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.fillText(idx + 1, p[0] * canvas.width + 8, p[1] * canvas.height - 8);
+      });
+    }
+
+    function updatePointsDisplay() {
+      cornerPointsDiv.textContent = `Points: ${points.length}/4`;
+    }
+
+    function storeExample() {
+      const offscreen = document.createElement('canvas');
+      offscreen.width = IMAGE_SIZE;
+      offscreen.height = IMAGE_SIZE;
+      const offCtx = offscreen.getContext('2d');
+      offCtx.drawImage(currentImgElement, 0, 0, IMAGE_SIZE, IMAGE_SIZE);
+      const imgTensor = tf.browser.fromPixels(offscreen).toFloat().div(255);
+      imgData.push(imgTensor);
+      labelData.push(points.flat());
+      
+      statusDiv.textContent = `Example added. Total examples: ${imgData.length}`;
+      exampleCountSpan.textContent = imgData.length;
+      
+      points = [];
+      updatePointsDisplay();
+      if (imgData.length > 0) {
+        trainBtn.disabled = false;
+      }
+    }
+
+    function createModel() {
+      const model = tf.sequential();
+      model.add(tf.layers.conv2d({
+        inputShape: [IMAGE_SIZE, IMAGE_SIZE, 3],
+        filters: 16, kernelSize: 3, activation: 'relu', padding: 'same'
+      }));
+      model.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+      model.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, activation: 'relu', padding: 'same' }));
+      model.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+      model.add(tf.layers.conv2d({ filters: 64, kernelSize: 3, activation: 'relu', padding: 'same' }));
+      model.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+      model.add(tf.layers.flatten());
+      model.add(tf.layers.dense({ units: 128, activation: 'relu' }));
+      model.add(tf.layers.dropout(0.5));
+      model.add(tf.layers.dense({ units: 8, activation: 'sigmoid' }));
+      model.compile({ 
+        optimizer: tf.train.adam(0.001), 
+        loss: 'meanSquaredError',
+        metrics: ['mse']
+      });
+      return model;
+    }
+
+    trainBtn.addEventListener('click', async () => {
+      if (imgData.length === 0) {
+        statusDiv.textContent = 'No training examples available.';
+        return;
+      }
+
+      model = createModel();
+      const xs = tf.stack(imgData);
+      const ys = tf.tensor2d(labelData);
+
+      statusDiv.textContent = 'Training...';
+      trainingProgressDiv.innerHTML = '';
+      
+      const NUM_EPOCHS = 30;
+      for (let i = 0; i < NUM_EPOCHS; i++) {
+        trainingProgressDiv.innerHTML += `<div>Epoch ${i+1}/${NUM_EPOCHS}: Starting...</div>`;
+      }
+      
+      const progressElements = trainingProgressDiv.getElementsByTagName('div');
+
+      await model.fit(xs, ys, {
+        epochs: NUM_EPOCHS,
+        batchSize: Math.min(4, imgData.length),
+        shuffle: true,
+        callbacks: {
+          onEpochEnd: (epoch, logs) => {
+            progressElements[epoch].textContent = `Epoch ${epoch + 1}/${NUM_EPOCHS}: loss = ${logs.loss.toFixed(4)}`;
+          },
+          onTrainEnd: () => {
+            statusDiv.textContent = 'Training complete!';
+            saveModelBtn.disabled = false;
+            if (currentImgElement) {
+              predictBtn.disabled = false;
+            }
+          }
+        }
+      });
+    });
+
+    saveModelBtn.addEventListener('click', async () => {
+      if (model) {
+        statusDiv.textContent = 'Saving model...';
+        try {
+          await model.save('downloads://corner_detector_model');
+          statusDiv.textContent = 'Model saved! Download should start automatically.';
+        } catch (error) {
+          statusDiv.textContent = `Error saving model: ${error.message}`;
+        }
+      }
+    });
+
+    loadModelBtn.addEventListener('click', async () => {
+      if (!modelJson || !modelWeights) {
+        statusDiv.textContent = 'Please select both model.json and weights.bin files.';
+        return;
+      }
+
+      statusDiv.textContent = 'Loading model...';
+      
+      try {
+        const modelHandler = tf.io.browserFiles([modelJson, modelWeights]);
+        
+        model = await tf.loadLayersModel(modelHandler);
+        
+        statusDiv.textContent = 'Model loaded successfully!';
+        if (currentImgElement) {
+          predictBtn.disabled = false;
+        }
+      } catch (error) {
+        statusDiv.textContent = `Error loading model: ${error.message}`;
+        console.error('Error loading model:', error);
+      }
+    });
+
+    predictBtn.addEventListener('click', async () => {
+      if (!model || !currentImgElement) return;
+
+      statusDiv.textContent = 'Predicting...';
+      
+      const offscreen = document.createElement('canvas');
+      offscreen.width = IMAGE_SIZE;
+      offscreen.height = IMAGE_SIZE;
+      const offCtx = offscreen.getContext('2d');
+      offCtx.drawImage(currentImgElement, 0, 0, IMAGE_SIZE, IMAGE_SIZE);
+      const input = tf.browser.fromPixels(offscreen).toFloat().div(255).expandDims();
+
+      const prediction = model.predict(input);
+      const corners = prediction.dataSync();
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(currentImgElement, 0, 0, canvas.width, canvas.height);
+      
+      ctx.fillStyle = 'lime';
+      ctx.strokeStyle = 'black';
+      for (let i = 0; i < 4; i++) {
+        const x = corners[i * 2] * canvas.width;
+        const y = corners[i * 2 + 1] * canvas.height;
+        
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+        
+        ctx.fillText(i + 1, x + 8, y - 8);
+      }
+      
+      ctx.strokeStyle = 'lime';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < 4; i++) {
+        const x = corners[i * 2] * canvas.width;
+        const y = corners[i * 2 + 1] * canvas.height;
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.closePath();
+      ctx.stroke();
+
+      statusDiv.textContent = `Prediction complete.`;
+    });
+  </script>
+</body>
+</html>
